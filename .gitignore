@@ -1,0 +1,82 @@
+# =============================================================================
+# Terraform: directorios locales de trabajo
+# =============================================================================
+# .terraform/ contiene los binarios de providers y módulos descargados por
+# `terraform init`. Es pesado, depende del sistema operativo y se regenera.
+**/.terraform/*
+
+# =============================================================================
+# Terraform: archivos de state
+# =============================================================================
+# El state guarda el inventario real de la infraestructura y puede contener
+# valores sensibles en texto plano (contraseñas, IPs, tokens). Vive en un
+# bucket GCS remoto; nunca debe llegar a Git.
+*.tfstate
+*.tfstate.*
+
+# =============================================================================
+# Terraform: logs de fallos
+# =============================================================================
+# Si Terraform crashea, vuelca un log que puede incluir variables y config.
+crash.log
+crash.*.log
+
+# =============================================================================
+# Terraform: archivos de variables
+# =============================================================================
+# Los .tfvars suelen tener valores específicos del entorno o sensibles.
+# Se versiona solo la plantilla *.tfvars.example (sin valores reales) para
+# documentar qué variables existen.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# =============================================================================
+# Terraform: archivos override
+# =============================================================================
+# Los override sirven para cambios locales temporales que "pisan" la config.
+# Si se versionan, alteran la infraestructura de forma poco visible.
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# =============================================================================
+# Terraform: configuración del CLI
+# =============================================================================
+# .terraformrc / terraform.rc pueden contener tokens de registries privados.
+.terraformrc
+terraform.rc
+
+# =============================================================================
+# Credenciales: llaves JSON
+# =============================================================================
+# Este repo autentica SOLO con Workload Identity Federation. Aun así, si por
+# error se descarga una llave de service account u otro archivo de
+# credenciales, esta red de seguridad evita que se suba a GitHub.
+*[Kk]ey*.json
+*[Cc]redentials*.json
+
+# =============================================================================
+# NOTA: .terraform.lock.hcl NO se ignora (a propósito).
+# =============================================================================
+# El lock file fija las versiones exactas y los hashes de los providers para
+# que local y CI usen exactamente los mismos binarios. Se versiona.
+
+# =============================================================================
+# Windows
+# =============================================================================
+# Miniaturas que genera el Explorador de archivos.
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# =============================================================================
+# VS Code
+# =============================================================================
+# La configuración del editor es personal, excepto extensions.json, que
+# recomienda extensiones útiles (p. ej. HashiCorp Terraform) a quien clone.
+# Se usa ".vscode/*" (y no ".vscode/") porque Git no puede re-incluir un
+# archivo si su carpeta padre completa está ignorada.
+.vscode/*
+!.vscode/extensions.json

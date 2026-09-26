@@ -1,0 +1,8 @@
+# Forzar finales de línea LF en el repositorio y en el checkout, aunque se
+# trabaje desde Windows. Evita diffs ruidosos y fallos en los runners Linux
+# de GitHub Actions (p. ej. scripts .sh con CRLF no se ejecutan).
+*.tf    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+*.sh    text eol=lf
