@@ -80,3 +80,6 @@ Desktop.ini
 # archivo si su carpeta padre completa está ignorada.
 .vscode/*
 !.vscode/extensions.json
+
+# Planes guardados: pueden contener valores sensibles
+*.tfplan
