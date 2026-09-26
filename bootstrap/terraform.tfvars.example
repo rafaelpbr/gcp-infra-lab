@@ -1,0 +1,7 @@
+# Copia este archivo como terraform.tfvars y rellena los valores.
+# terraform.tfvars está en .gitignore; este .example sí se versiona.
+project_id      = "mi-proyecto-gcp"
+region          = "us-central1"
+github_owner    = "mi-usuario-github"
+github_repo     = "mi-repo"
+github_owner_id = "12345678"
