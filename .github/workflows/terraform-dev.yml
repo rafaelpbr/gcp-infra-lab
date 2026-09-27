@@ -1,0 +1,194 @@
+# Pipeline GitOps de envs/dev:
+#   - Pull Request -> job "plan"  (SA tf-plan, solo lectura)
+#   - Merge a main -> job "apply" (SA tf-apply, pasa por el environment "dev")
+# Autenticación con Workload Identity Federation: no hay llaves ni secrets.
+name: terraform-dev
+
+# -----------------------------------------------------------------------------
+# Cuándo se ejecuta
+# -----------------------------------------------------------------------------
+# PR y push solo reaccionan a cambios en envs/dev; workflow_dispatch permite
+# lanzarlo a mano (p. ej. para re-aplicar si hubo drift).
+on:
+  pull_request:
+    branches: [main]
+    paths: ["envs/dev/**"]
+  push:
+    branches: [main]
+    paths: ["envs/dev/**"]
+  workflow_dispatch:
+
+# -----------------------------------------------------------------------------
+# Permisos del GITHUB_TOKEN (todo lo no listado queda en "none")
+# -----------------------------------------------------------------------------
+permissions:
+  contents: read       # Hacer checkout del repositorio
+  id-token: write      # Pedir el token OIDC que WIF cambia por credenciales de GCP
+  pull-requests: write # Publicar/actualizar el comentario con el plan en el PR
+
+# -----------------------------------------------------------------------------
+# Concurrencia
+# -----------------------------------------------------------------------------
+# Una sola ejecución a la vez sobre envs/dev. No se cancela la que está en
+# curso: interrumpir un apply a mitad puede dejar el state bloqueado o a medias.
+concurrency:
+  group: terraform-dev
+  cancel-in-progress: false
+
+# -----------------------------------------------------------------------------
+# Valores por defecto de los pasos "run"
+# -----------------------------------------------------------------------------
+# shell: bash explícito hace que GitHub use "bash -eo pipefail": si terraform
+# falla dentro de un pipe (| tee), el paso también falla.
+defaults:
+  run:
+    shell: bash
+    working-directory: envs/dev
+
+jobs:
+  # ===========================================================================
+  # PLAN: en cada Pull Request, con la SA de solo lectura.
+  # ===========================================================================
+  plan:
+    name: plan
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      # Descarga el código del PR. Va antes de auth, porque auth escribe un
+      # archivo de configuración temporal dentro del workspace.
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Cambia el token OIDC de GitHub por credenciales de corta duración de
+      # tf-plan. Los valores son GitHub Variables (no secretos).
+      - name: Autenticar en GCP (WIF, tf-plan)
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_PLAN_SA }}
+
+      # Instala exactamente la misma versión de Terraform que se usa en local.
+      # Sin wrapper: así "tee" captura la salida real y los códigos de salida
+      # son los de terraform.
+      - name: Instalar Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.16.2"
+          terraform_wrapper: false
+
+      # Falla si algún archivo no tiene el formato estándar de terraform fmt.
+      - name: terraform fmt
+        run: terraform fmt -check -recursive
+
+      # Configura el backend GCS y descarga el provider verificando los hashes
+      # de .terraform.lock.hcl.
+      - name: terraform init
+        run: terraform init -input=false
+
+      - name: terraform validate
+        run: terraform validate -no-color
+
+      # -lock=false: tf-plan solo puede leer el bucket de state, no crear el
+      # archivo de lock (ver trade-off en bootstrap/service_accounts.tf).
+      # continue-on-error: permite publicar el plan (o el error) en el PR antes
+      # de marcar el job como fallido en el último paso.
+      - name: terraform plan
+        id: plan
+        continue-on-error: true
+        run: terraform plan -input=false -lock=false -no-color -out=tfplan 2>&1 | tee plan_output.txt
+
+      # Construye el comentario una sola vez; lo usan el PR y el job summary.
+      # El marcador HTML invisible permite encontrar el comentario anterior.
+      # Se trunca porque un comentario de GitHub admite ~65 000 caracteres.
+      - name: Preparar comentario del plan
+        env:
+          PLAN_OUTCOME: ${{ steps.plan.outcome }}
+        run: |
+          if [ "$PLAN_OUTCOME" = "success" ]; then STATUS="✅ correcto"; else STATUS="❌ falló"; fi
+          {
+            echo "<!-- terraform-dev-plan -->"
+            echo "### Terraform plan · envs/dev · ${STATUS}"
+            echo
+            echo "<details><summary>Ver salida del plan</summary>"
+            echo
+            echo '```'
+            head -c 60000 plan_output.txt
+            echo
+            echo '```'
+            echo "</details>"
+            echo
+            echo "_Commit: ${GITHUB_SHA}_"
+          } > plan_comment.md
+
+      # Publica el plan en el PR. Si ya existe un comentario del bot con el
+      # marcador, lo edita (PATCH) en lugar de crear uno nuevo en cada push.
+      # Usa gh (preinstalado en el runner) con el GITHUB_TOKEN automático.
+      - name: Comentar plan en el PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          COMMENT_ID=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- terraform-dev-plan -->"))) | .id' \
+            | head -n 1)
+          if [ -n "$COMMENT_ID" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}" -F body=@plan_comment.md > /dev/null
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" -F body=@plan_comment.md > /dev/null
+          fi
+
+      # El mismo contenido en la página de resumen de la ejecución.
+      - name: Publicar plan en el job summary
+        run: cat plan_comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      # Si el plan falló, el job debe terminar en rojo (el continue-on-error
+      # de arriba solo servía para publicar el resultado primero).
+      - name: Fallar si el plan falló
+        if: steps.plan.outcome == 'failure'
+        run: |
+          echo "terraform plan falló; revisa la salida en el comentario o el summary."
+          exit 1
+
+  # ===========================================================================
+  # APPLY: tras merge a main (o lanzamiento manual desde main), con la SA de
+  # escritura. environment: dev hace que el token OIDC lleve el subject
+  # repo:rafaelpbr/gcp-infra-lab:environment:dev, el único que tf-apply acepta.
+  # ===========================================================================
+  apply:
+    name: apply
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Credenciales de corta duración de tf-apply (solo válido desde el
+      # environment "dev", por el binding con "subject" de bootstrap).
+      - name: Autenticar en GCP (WIF, tf-apply)
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_APPLY_SA }}
+
+      - name: Instalar Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.16.2"
+          terraform_wrapper: false
+
+      - name: terraform init
+        run: terraform init -input=false
+
+      # Aquí el plan SÍ bloquea el state (tf-apply puede escribir el .tflock)
+      # y se guarda en tfplan para aplicar exactamente lo que se calculó.
+      - name: terraform plan
+        run: terraform plan -input=false -out=tfplan
+
+      # Aplica el plan guardado: sin -auto-approve, porque un plan guardado no
+      # pide confirmación. La revisión humana ocurrió en el PR (y, si se
+      # configura, en la aprobación del environment "dev").
+      - name: terraform apply
+        run: terraform apply -input=false tfplan
