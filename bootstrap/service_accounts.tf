@@ -96,8 +96,15 @@ resource "google_storage_bucket_iam_member" "tf_apply_state_admin" {
 # a tf-apply. GitHub emite ese subject únicamente para jobs declarados con
 # `environment: dev`, que pueden protegerse con reglas (aprobación manual,
 # solo rama main). Una rama o un PR cualquiera no obtiene ese subject.
+#
+# Formato inmutable del claim sub (use_immutable_subject: true en el repo):
+#   repo:<owner>@<owner_id>/<repo>@<repo_id>:environment:dev
+# Además de los nombres, incluye los IDs numéricos del owner y del repo, que
+# GitHub nunca reasigna. Con el formato viejo (repo:<owner>/<repo>:...), si se
+# renombrara o borrara la cuenta o el repo, otra persona podría recrear uno con
+# el mismo nombre y emitir un subject idéntico. Con los IDs eso es imposible.
 resource "google_service_account_iam_member" "tf_apply_wif" {
   service_account_id = google_service_account.tf_apply.name
   role               = "roles/iam.workloadIdentityUser"
-  member             = "principal://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/subject/repo:${local.github_repository}:environment:dev"
+  member             = "principal://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/subject/repo:${var.github_owner}@${var.github_owner_id}/${var.github_repo}@${var.github_repo_id}:environment:dev"
 }
