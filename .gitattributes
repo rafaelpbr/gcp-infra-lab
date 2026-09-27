@@ -6,3 +6,6 @@
 *.yaml  text eol=lf
 *.md    text eol=lf
 *.sh    text eol=lf
+# .terraform.lock.hcl: Terraform lo regenera con LF; si Git lo convirtiera a
+# CRLF en Windows, aparecería como modificado sin cambios reales.
+*.hcl   text eol=lf
