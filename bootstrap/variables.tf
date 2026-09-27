@@ -23,3 +23,8 @@ variable "github_owner_id" {
   description = "ID numérico inmutable del owner en GitHub. Se usa en la condición de WIF porque, a diferencia del nombre, no se puede reutilizar si la cuenta se renombra o elimina."
   type        = string
 }
+
+variable "github_repo_id" {
+  description = "ID numérico inmutable del repositorio en GitHub. Forma parte del claim sub en formato inmutable, que se usa en el binding de tf-apply."
+  type        = string
+}
