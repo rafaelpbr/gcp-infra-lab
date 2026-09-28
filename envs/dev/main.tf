@@ -7,7 +7,7 @@ resource "google_storage_bucket" "demo" {
   uniform_bucket_level_access = true
 
   # Bloquea cualquier intento de hacer público el bucket o sus objetos.
-  public_access_prevention = "enforced"
+  public_access_prevention = "inherited"
 
   # Guarda versiones anteriores de los objetos sobrescritos o borrados.
   versioning {
@@ -29,4 +29,10 @@ resource "google_storage_bucket" "demo" {
       type = "Delete"
     }
   }
+}
+# SIMULACRO: intento de hacer público el bucket. NO debe llegar a main.
+resource "google_storage_bucket_iam_member" "public_read" {
+  bucket = google_storage_bucket.demo.name
+  role   = "roles/storage.objectViewer"
+  member = "allUsers"
 }
