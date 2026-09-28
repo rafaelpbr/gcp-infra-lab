@@ -1,4 +1,5 @@
 resource "google_storage_bucket" "demo" {
+  #checkov:skip=CKV_GCP_62:Bucket de demo sin datos reales y con borrado a 30 días. Un bucket de usage logs adicional añade costo y complejidad sin valor para el lab; los cambios de configuración ya quedan en Cloud Audit Logs.
   name     = "${local.project_id}-dev-demo"
   location = local.region
 

@@ -1,39 +1,36 @@
 # Pipeline GitOps de envs/dev:
-#   - Pull Request -> job "plan"  (SA tf-plan, solo lectura)
+#   - Pull Request -> jobs "plan" (SA tf-plan, solo lectura) y "checkov" (análisis estático)
 #   - Merge a main -> job "apply" (SA tf-apply, pasa por el environment "dev")
 # Autenticación con Workload Identity Federation: no hay llaves ni secrets.
+#
+# Todas las actions están fijadas por SHA completo de commit (inmutable); el
+# comentario indica la versión a la que corresponde. Dependabot las actualiza.
 name: terraform-dev
 
 # -----------------------------------------------------------------------------
 # Cuándo se ejecuta
 # -----------------------------------------------------------------------------
-# PR y push solo reaccionan a cambios en envs/dev; workflow_dispatch permite
-# lanzarlo a mano (p. ej. para re-aplicar si hubo drift).
+# pull_request SIN filtro paths: "plan" y "checkov" serán required status
+# checks del ruleset de main (paso 7b). Un check requerido que no se ejecuta
+# nunca reporta, y el PR queda bloqueado para siempre esperando. Por eso deben
+# correr en TODOS los PRs, aunque no toquen envs/dev (el plan saldrá sin cambios).
+#
+# push SÍ mantiene el filtro: solo tiene sentido aplicar si cambió envs/dev.
+# workflow_dispatch permite lanzarlo a mano (p. ej. para corregir drift).
 on:
   pull_request:
     branches: [main]
-    paths: ["envs/dev/**"]
   push:
     branches: [main]
     paths: ["envs/dev/**"]
   workflow_dispatch:
 
 # -----------------------------------------------------------------------------
-# Permisos del GITHUB_TOKEN (todo lo no listado queda en "none")
+# Permisos por defecto del GITHUB_TOKEN: mínimos. Cada job declara los suyos
+# (al declarar permissions en un job, reemplaza por completo a estos).
 # -----------------------------------------------------------------------------
 permissions:
-  contents: read       # Hacer checkout del repositorio
-  id-token: write      # Pedir el token OIDC que WIF cambia por credenciales de GCP
-  pull-requests: write # Publicar/actualizar el comentario con el plan en el PR
-
-# -----------------------------------------------------------------------------
-# Concurrencia
-# -----------------------------------------------------------------------------
-# Una sola ejecución a la vez sobre envs/dev. No se cancela la que está en
-# curso: interrumpir un apply a mitad puede dejar el state bloqueado o a medias.
-concurrency:
-  group: terraform-dev
-  cancel-in-progress: false
+  contents: read
 
 # -----------------------------------------------------------------------------
 # Valores por defecto de los pasos "run"
@@ -54,16 +51,28 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: read       # Hacer checkout del repositorio
+      id-token: write      # Pedir el token OIDC que WIF cambia por credenciales de GCP
+      pull-requests: write # Publicar/actualizar el comentario con el plan en el PR
+
+    # Un plan por PR a la vez; si llega un commit nuevo, el plan del commit
+    # anterior ya no sirve y se cancela. No compite con otros PRs ni con apply
+    # (el plan usa -lock=false, no necesita exclusividad sobre el state).
+    concurrency:
+      group: terraform-dev-plan-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+
     steps:
       # Descarga el código del PR. Va antes de auth, porque auth escribe un
       # archivo de configuración temporal dentro del workspace.
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Cambia el token OIDC de GitHub por credenciales de corta duración de
       # tf-plan. Los valores son GitHub Variables (no secretos).
       - name: Autenticar en GCP (WIF, tf-plan)
-        uses: google-github-actions/auth@v3
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_PLAN_SA }}
@@ -72,7 +81,7 @@ jobs:
       # Sin wrapper: así "tee" captura la salida real y los códigos de salida
       # son los de terraform.
       - name: Instalar Terraform
-        uses: hashicorp/setup-terraform@v4
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: "1.16.2"
           terraform_wrapper: false
@@ -151,9 +160,54 @@ jobs:
           exit 1
 
   # ===========================================================================
+  # CHECKOV: análisis estático de seguridad del código Terraform, en paralelo
+  # a plan. No se conecta a GCP (no necesita id-token): solo lee el código.
+  # Falla si hay hallazgos sin un #checkov:skip justificado en el recurso.
+  # ===========================================================================
+  checkov:
+    name: checkov
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read # Hacer checkout del repositorio
+
+    concurrency:
+      group: terraform-dev-checkov-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # La action solo acepta un directorio, así que hay un paso por carpeta.
+      # soft_fail: false -> cualquier hallazgo no justificado hace fallar el job.
+      - name: Checkov bootstrap/
+        uses: bridgecrewio/checkov-action@5798bad4f6dd9c1fb67ae3ec10d42d8fb67037c4 # v12.3126.0
+        with:
+          directory: bootstrap
+          framework: terraform
+          soft_fail: false
+          quiet: true
+          compact: true
+
+      # success() || failure(): se ejecuta aunque el paso anterior haya
+      # fallado, para ver todos los hallazgos en una sola ejecución.
+      - name: Checkov envs/dev/
+        if: success() || failure()
+        uses: bridgecrewio/checkov-action@5798bad4f6dd9c1fb67ae3ec10d42d8fb67037c4 # v12.3126.0
+        with:
+          directory: envs/dev
+          framework: terraform
+          soft_fail: false
+          quiet: true
+          compact: true
+
+  # ===========================================================================
   # APPLY: tras merge a main (o lanzamiento manual desde main), con la SA de
   # escritura. environment: dev hace que el token OIDC lleve el subject
-  # repo:rafaelpbr/gcp-infra-lab:environment:dev, el único que tf-apply acepta.
+  # inmutable repo:rafaelpbr@60355588/gcp-infra-lab@1389435239:environment:dev,
+  # el único que tf-apply acepta.
   # ===========================================================================
   apply:
     name: apply
@@ -161,20 +215,30 @@ jobs:
     runs-on: ubuntu-latest
     environment: dev
 
+    permissions:
+      contents: read  # Hacer checkout del repositorio
+      id-token: write # Pedir el token OIDC que WIF cambia por credenciales de GCP
+
+    # Un solo apply a la vez sobre envs/dev. No se cancela el que está en
+    # curso: interrumpir un apply a mitad puede dejar el state bloqueado o a medias.
+    concurrency:
+      group: terraform-dev-apply
+      cancel-in-progress: false
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Credenciales de corta duración de tf-apply (solo válido desde el
       # environment "dev", por el binding con "subject" de bootstrap).
       - name: Autenticar en GCP (WIF, tf-apply)
-        uses: google-github-actions/auth@v3
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_APPLY_SA }}
 
       - name: Instalar Terraform
-        uses: hashicorp/setup-terraform@v4
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: "1.16.2"
           terraform_wrapper: false
@@ -188,7 +252,7 @@ jobs:
         run: terraform plan -input=false -out=tfplan
 
       # Aplica el plan guardado: sin -auto-approve, porque un plan guardado no
-      # pide confirmación. La revisión humana ocurrió en el PR (y, si se
-      # configura, en la aprobación del environment "dev").
+      # pide confirmación. La revisión humana ocurrió en el PR y en la
+      # aprobación del environment "dev".
       - name: terraform apply
         run: terraform apply -input=false tfplan

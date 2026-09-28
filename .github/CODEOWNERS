@@ -1,0 +1,12 @@
+# Dueños del código: GitHub pide su revisión en los PRs que tocan estas rutas
+# (el ruleset de main del paso 7b exigirá esa revisión).
+# Gana la ÚLTIMA regla que coincide, por eso lo general va primero.
+
+# Todo el repositorio.
+* @rafaelpbr
+
+# Workflows, Dependabot y este archivo: controlan qué se ejecuta con acceso a GCP.
+/.github/ @rafaelpbr
+
+# Identidad y permisos del pipeline (WIF, service accounts, bucket de state).
+/bootstrap/ @rafaelpbr
