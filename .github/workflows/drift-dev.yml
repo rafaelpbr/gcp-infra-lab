@@ -1,0 +1,178 @@
+# Detección de drift en envs/dev: compara cada día la infraestructura real de
+# GCP con el código de main. Si alguien cambió algo "a mano" (consola, gcloud),
+# abre o actualiza un issue con label "drift". Solo DETECTA: nunca corrige.
+# Usa tf-plan (solo lectura) vía Workload Identity Federation: sin secrets.
+name: drift-dev
+
+# -----------------------------------------------------------------------------
+# Cuándo se ejecuta
+# -----------------------------------------------------------------------------
+# schedule: los cron de GitHub van en UTC. Caracas es UTC-4 todo el año (sin
+# horario de verano), así que 11:17 UTC = 07:17 en Caracas. El minuto 17 evita
+# la punta de las horas en punto, cuando GitHub más retrasa los cron.
+#
+# schedule SOLO corre desde la rama por defecto (main): GitHub toma el archivo
+# del workflow y el código del último commit de main. Por eso:
+#   - una rama o un PR no puede programar ejecuciones propias;
+#   - lo que se compara con GCP es siempre el código ya aprobado y mergeado,
+#     que es justamente la "verdad" de GitOps.
+# Nota: en repos públicos GitHub desactiva los schedule tras 60 días sin
+# actividad en el repo.
+#
+# workflow_dispatch: permite lanzarlo a mano (p. ej. tras un cambio sospechoso).
+on:
+  schedule:
+    - cron: "17 11 * * *"
+  workflow_dispatch:
+
+# Permisos por defecto mínimos; el job declara los suyos.
+permissions:
+  contents: read
+
+# Evita dos ejecuciones simultáneas (cron + manual) que podrían crear dos
+# issues duplicados. No cancela la que está en curso.
+concurrency:
+  group: drift-dev
+  cancel-in-progress: false
+
+# shell: bash explícito = "bash -eo pipefail".
+defaults:
+  run:
+    shell: bash
+    working-directory: envs/dev
+
+jobs:
+  drift:
+    name: drift
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read  # Hacer checkout del repositorio
+      id-token: write # Pedir el token OIDC que WIF cambia por credenciales de tf-plan
+      issues: write   # Crear el label "drift" y abrir/comentar/cerrar issues
+
+    steps:
+      # Mismas actions y SHAs que terraform-dev.yml.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # tf-plan (solo lectura). NUNCA tf-apply: este workflow no corrige nada.
+      # Además no declara environment, así que tampoco podría obtener el
+      # subject OIDC que tf-apply exige.
+      - name: Autenticar en GCP (WIF, tf-plan)
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_PLAN_SA }}
+
+      - name: Instalar Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.16.2"
+          terraform_wrapper: false
+
+      - name: terraform init
+        run: terraform init -input=false
+
+      # -detailed-exitcode: 0 = sin cambios, 1 = error, 2 = hay diferencias.
+      # "set +e" desactiva el fallo automático para poder capturar el código;
+      # PIPESTATUS[0] es el código de terraform (no el de tee).
+      # -lock=false: tf-plan no puede escribir el lock en el bucket de state.
+      - name: terraform plan (detección de drift)
+        id: plan
+        run: |
+          set +e
+          terraform plan -input=false -lock=false -no-color -detailed-exitcode 2>&1 | tee plan_output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          echo "exitcode=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
+          echo "terraform plan terminó con código ${EXIT_CODE}"
+
+      # Código 1: el plan no pudo ejecutarse (permisos, API, sintaxis...).
+      # No sabemos si hay drift, así que el job falla y GitHub lo notifica.
+      - name: Fallar si el plan dio error
+        if: steps.plan.outputs.exitcode != '0' && steps.plan.outputs.exitcode != '2'
+        run: |
+          echo "terraform plan falló (código ${{ steps.plan.outputs.exitcode }}); no se pudo comprobar el drift."
+          exit 1
+
+      # El label se crea (o se actualiza) de forma idempotente con --force.
+      - name: Asegurar label "drift"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh label create drift --color B60205 --description "Diferencias entre GCP y el código de envs/dev" --force
+
+      # Código 2: hay drift. Si ya hay un issue abierto con label "drift", se
+      # añade un comentario con el plan de hoy; si no, se abre uno nuevo.
+      # Así hay un único issue por episodio de drift, con su historial.
+      - name: Reportar drift en un issue
+        if: steps.plan.outputs.exitcode == '2'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          {
+            echo "### ⚠️ Drift detectado en envs/dev"
+            echo
+            echo "La infraestructura real de GCP no coincide con el código de \`main\`."
+            echo
+            echo "- Run: ${RUN_URL}"
+            echo "- Commit comparado: \`${GITHUB_SHA}\`"
+            echo "- Fecha (UTC): $(date -u '+%Y-%m-%d %H:%M')"
+            echo
+            echo "<details><summary>Ver plan</summary>"
+            echo
+            echo '```'
+            head -c 60000 plan_output.txt
+            echo
+            echo '```'
+            echo "</details>"
+          } > drift_body.md
+
+          ISSUE=$(gh issue list --label drift --state open --limit 1 --json number --jq '.[0].number // empty')
+          if [ -n "$ISSUE" ]; then
+            gh issue comment "$ISSUE" --body-file drift_body.md
+            echo "Drift añadido como comentario al issue #${ISSUE}"
+          else
+            gh issue create --title "Drift detectado en envs/dev" --label drift --body-file drift_body.md
+          fi
+
+      # Código 0: sin drift. Si quedaba un issue abierto, el drift se resolvió
+      # (se revirtió o se codificó): se cierra con un comentario.
+      - name: Cerrar issue de drift resuelto
+        if: steps.plan.outputs.exitcode == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ISSUE=$(gh issue list --label drift --state open --limit 1 --json number --jq '.[0].number // empty')
+          if [ -n "$ISSUE" ]; then
+            RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            gh issue close "$ISSUE" --comment "✅ Sin drift: GCP vuelve a coincidir con \`main\` (${RUN_URL})."
+            echo "Issue #${ISSUE} cerrado"
+          else
+            echo "Sin drift y sin issues abiertos."
+          fi
+
+      # Resumen visible en la página del run en cualquier caso.
+      - name: Job summary
+        if: always() && steps.plan.outputs.exitcode != ''
+        run: |
+          case "${{ steps.plan.outputs.exitcode }}" in
+            0) STATUS="✅ Sin drift" ;;
+            2) STATUS="⚠️ Drift detectado" ;;
+            *) STATUS="❌ Error al ejecutar el plan" ;;
+          esac
+          {
+            echo "### ${STATUS} · envs/dev"
+            echo
+            echo "<details><summary>Ver plan</summary>"
+            echo
+            echo '```'
+            head -c 60000 plan_output.txt
+            echo
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
