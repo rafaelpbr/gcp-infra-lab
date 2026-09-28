@@ -1,0 +1,18 @@
+# Dependabot abre PRs semanales para actualizar dependencias. Cada PR pasa por
+# los mismos checks (plan + checkov) y revisión que cualquier otro cambio.
+version: 2
+updates:
+  # Actions de los workflows: actualiza el SHA fijado y el comentario de versión.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  # Provider de Terraform (hashicorp/google) en cada raíz: actualiza la
+  # restricción de versión y .terraform.lock.hcl.
+  - package-ecosystem: terraform
+    directories:
+      - /bootstrap
+      - /envs/dev
+    schedule:
+      interval: weekly

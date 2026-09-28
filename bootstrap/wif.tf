@@ -14,6 +14,7 @@ resource "google_iam_workload_identity_pool" "github" {
 
 # Provider: define CÓMO confiar en los tokens OIDC que emite GitHub.
 resource "google_iam_workload_identity_pool_provider" "github" {
+  #checkov:skip=CKV_GCP_125:La condición no usa assertion.sub a propósito: filtra por repository_owner_id (inmutable) y repository, y la restricción por job/environment se hace en cada binding IAM (subject inmutable para tf-apply). Un sub fijo aquí impediría que plan y apply compartan el provider.
   project                            = var.project_id
   workload_identity_pool_id          = google_iam_workload_identity_pool.github.workload_identity_pool_id
   workload_identity_pool_provider_id = "github-provider"

@@ -1,4 +1,5 @@
 resource "google_storage_bucket" "tfstate" {
+  #checkov:skip=CKV_GCP_62:Los usage logs de GCS son un mecanismo legado que exige otro bucket de logs. En este lab el acceso queda en Cloud Audit Logs (Admin Activity siempre activo); activar Data Access para Storage es la mejora pendiente si se necesita auditar lecturas del state.
   name     = "${var.project_id}-tfstate"
   location = var.region
   project  = var.project_id
