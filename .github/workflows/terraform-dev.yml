@@ -183,7 +183,7 @@ jobs:
       # La action solo acepta un directorio, así que hay un paso por carpeta.
       # soft_fail: false -> cualquier hallazgo no justificado hace fallar el job.
       - name: Checkov bootstrap/
-        uses: bridgecrewio/checkov-action@5798bad4f6dd9c1fb67ae3ec10d42d8fb67037c4 # v12.3126.0
+        uses: bridgecrewio/checkov-action@d0dd2e9434b4428060edba72d050c135273bd677 # v12.3132.0
         with:
           directory: bootstrap
           framework: terraform
@@ -195,7 +195,7 @@ jobs:
       # fallado, para ver todos los hallazgos en una sola ejecución.
       - name: Checkov envs/dev/
         if: success() || failure()
-        uses: bridgecrewio/checkov-action@5798bad4f6dd9c1fb67ae3ec10d42d8fb67037c4 # v12.3126.0
+        uses: bridgecrewio/checkov-action@d0dd2e9434b4428060edba72d050c135273bd677 # v12.3132.0
         with:
           directory: envs/dev
           framework: terraform
